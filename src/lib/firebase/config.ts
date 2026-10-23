@@ -1,5 +1,6 @@
 /**
  * Firebase Client Configuration with Explicit Named Database and Storage Isolation
+ * Strictly client-safe: No Admin SDK credentials or private keys.
  */
 
 export const firebaseConfig = {
@@ -13,8 +14,16 @@ export const firebaseConfig = {
   messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || '',
 };
 
+export function getMissingClientConfig(): string[] {
+  const missing: string[] = [];
+  if (!firebaseConfig.apiKey) missing.push('NEXT_PUBLIC_FIREBASE_API_KEY');
+  if (!firebaseConfig.appId) missing.push('NEXT_PUBLIC_FIREBASE_APP_ID');
+  return missing;
+}
+
 export const IS_FIREBASE_CONFIGURED = Boolean(
   firebaseConfig.projectId &&
   firebaseConfig.apiKey &&
+  firebaseConfig.appId &&
   firebaseConfig.databaseId
 );

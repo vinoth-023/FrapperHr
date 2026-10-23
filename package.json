@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
-    "start": "next start -p 3000"
+    "start": "next start -p 3000",
+    "typecheck": "tsc --noEmit",
+    "test:security": "tsx tests/security-rules.test.ts"
   },
   "dependencies": {
     "firebase": "^11.4.0",
@@ -22,6 +24,7 @@
     "@types/react-dom": "^19.3.0",
     "postcss": "^8.5.31",
     "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.15",
     "typescript": "^5.8.2"
   }
 }

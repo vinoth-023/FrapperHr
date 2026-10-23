@@ -1,17 +1,74 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
-    // Default-deny everything to prevent cross-app contamination on shared buckets
+
+    // 1. Default-deny on all paths to protect shared bucket resources
     match /{allPaths=**} {
       allow read, write: if false;
     }
 
-    // HRMS dedicated prefix maxco-hr/
-    match /maxco-hr/{companyId}/{allPaths=**} {
-      // Must be authenticated to access any HRMS asset
-      allow read: if request.auth != null;
-      // Writes restricted to authenticated company operations (e.g. docs, photos)
-      allow write: if request.auth != null && request.resource.size < 10 * 1024 * 1024;
+    // --- REUSABLE STORAGE HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSafeSize(maxBytes) {
+      return request.resource.size <= maxBytes;
+    }
+
+    function isImage() {
+      return request.resource.contentType.matches('image/(jpeg|png|webp|svg\\+xml)');
+    }
+
+    function isDocument() {
+      return request.resource.contentType.matches('application/pdf|image/(jpeg|png)');
+    }
+
+    // 2. HRMS Dedicated Namespace: maxco-hr/{companyId}/...
+    match /maxco-hr/{companyId} {
+
+      // User / Employee Profile Avatars
+      // Max 2MB, image types only. Users can upload only their own avatar.
+      match /avatars/{userId}/{fileName} {
+        allow read: if isSignedIn();
+        allow create, update: if isSignedIn() &&
+          request.auth.uid == userId &&
+          isSafeSize(2 * 1024 * 1024) &&
+          isImage();
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+
+      // Employee Sensitive Documents (ID proof, education, contracts)
+      // Max 10MB, PDF or image. Readable by employee or HR/Admin.
+      match /employees/{employeeId}/{fileName} {
+        allow read: if isSignedIn() && (
+          request.auth.uid == employeeId ||
+          (request.auth.token != null && 'role' in request.auth.token &&
+           request.auth.token.role in ['company_admin', 'super_admin', 'hr', 'payroll'])
+        );
+        allow create, update: if isSignedIn() && (
+          request.auth.uid == employeeId ||
+          (request.auth.token != null && 'role' in request.auth.token &&
+           request.auth.token.role in ['company_admin', 'super_admin', 'hr'])
+        ) &&
+          isSafeSize(10 * 1024 * 1024) &&
+          isDocument();
+        allow delete: if isSignedIn() && (
+          (request.auth.token != null && 'role' in request.auth.token &&
+           request.auth.token.role in ['company_admin', 'super_admin', 'hr'])
+        );
+      }
+
+      // Company Branding & Documents (Logos, Handbooks)
+      match /company/{fileName} {
+        allow read: if isSignedIn();
+        allow create, update: if isSignedIn() &&
+          isSafeSize(5 * 1024 * 1024) &&
+          isDocument();
+        allow delete: if isSignedIn() &&
+          (request.auth.token != null && 'role' in request.auth.token &&
+           request.auth.token.role in ['company_admin', 'super_admin']);
+      }
     }
   }
 }

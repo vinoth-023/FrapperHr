@@ -2,12 +2,13 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Default-deny all unmapped paths
+    // 1. Default-deny catch-all for any unmapped paths
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Helper functions for hardened ABAC
+    // --- REUSABLE AUTHORIZATION HELPERS ---
+
     function isSignedIn() {
       return request.auth != null;
     }
@@ -28,26 +29,60 @@ service cloud.firestore {
       return isCompanyMember(companyId) && (getMembership(companyId).role in roles);
     }
 
-    // User profile documents
+    // --- 2. USER PROFILES ---
+    // Strict PII protection: Users can only read/write their own identity profile.
     match /users/{uid} {
-      allow read: if isSignedIn();
-      allow create, update: if isOwner(uid);
+      allow read: if isOwner(uid);
+      allow create, update: if isOwner(uid) &&
+        // Users cannot grant themselves global super_admin in profile document
+        (!('isSuperAdmin' in request.resource.data) || request.resource.data.isSuperAdmin == false);
       allow delete: if false;
     }
 
-    // Companies & Company Isolation Gate
+    // --- 3. COMPANIES & MULTI-TENANT ISOLATION ---
     match /companies/{companyId} {
+      // Only active members can read their company's core configuration
       allow read: if isCompanyMember(companyId);
-      allow create: if isSignedIn();
-      allow update, delete: if hasCompanyRole(companyId, ['super_admin', 'company_admin']);
 
-      // Company memberships
+      // Onboarding: Authenticated user creates a company; must record createdBy as own UID
+      allow create: if isSignedIn() &&
+        request.resource.data.createdBy == request.auth.uid &&
+        request.resource.data.status in ['active', 'trial'];
+
+      // Only Company Admin or Super Admin can update or archive the company
+      allow update: if hasCompanyRole(companyId, ['super_admin', 'company_admin']) &&
+        // Immutable ownership field
+        request.resource.data.createdBy == resource.data.createdBy;
+
+      allow delete: if hasCompanyRole(companyId, ['super_admin', 'company_admin']);
+
+      // --- 3A. COMPANY MEMBERSHIPS (RBAC GATEWAY) ---
       match /members/{memberUid} {
         allow read: if isCompanyMember(companyId);
-        allow create, update, delete: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
+
+        // Bootstrap flow vs subsequent member invites:
+        allow create: if isSignedIn() && (
+          // Bootstrap: Creator of company creates their initial company_admin membership
+          (memberUid == request.auth.uid &&
+           request.resource.data.role == 'company_admin' &&
+           get(/databases/$(database)/documents/companies/$(companyId)).data.createdBy == request.auth.uid) ||
+          // Subsequent invites: Must be company_admin/super_admin; cannot self-grant super_admin
+          (hasCompanyRole(companyId, ['super_admin', 'company_admin']) &&
+           request.resource.data.role != 'super_admin')
+        );
+
+        // Updates: Prevent self-privilege escalation (cannot modify own role)
+        allow update: if hasCompanyRole(companyId, ['super_admin', 'company_admin']) &&
+          request.resource.data.role != 'super_admin' &&
+          // Cannot modify your own membership role/status to prevent lockout & self-escalation
+          (request.auth.uid != memberUid || request.resource.data.role == resource.data.role);
+
+        // Deletion: Cannot delete your own membership
+        allow delete: if hasCompanyRole(companyId, ['super_admin', 'company_admin']) &&
+          request.auth.uid != memberUid;
       }
 
-      // Departments & Designations
+      // --- 3B. DEPARTMENTS & DESIGNATIONS ---
       match /departments/{departmentId} {
         allow read: if isCompanyMember(companyId);
         allow write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
@@ -58,31 +93,80 @@ service cloud.firestore {
         allow write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
       }
 
-      // Employees Directory
+      // --- 3C. EMPLOYEES & SENSITIVE STATUTORY RECORDS ---
       match /employees/{employeeId} {
+        // Restricted read: Only HR/Admin/Payroll OR the employee themselves
+        allow read: if isCompanyMember(companyId) && (
+          hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr', 'payroll']) ||
+          (resource != null && 'uid' in resource.data && resource.data.uid == request.auth.uid)
+        );
+
+        // Write restricted strictly to HR and Administrators
+        allow write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
+      }
+
+      // --- 3D. ATTENDANCE RECORDS ---
+      match /attendanceRecords/{recordId} {
+        // Read: Employee concerned or Manager/HR/Admin
+        allow read: if isCompanyMember(companyId) && (
+          hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr', 'manager']) ||
+          (resource != null && resource.data.employeeId == request.auth.uid)
+        );
+
+        // Create: Employee can only punch for THEMSELVES; managers/HR can punch on behalf
+        allow create: if isCompanyMember(companyId) && (
+          (request.resource.data.employeeId == request.auth.uid) ||
+          hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr', 'manager'])
+        );
+
+        // Update: Regular employees cannot alter past attendance; only HR / Admins
+        allow update, delete: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
+      }
+
+      // --- 3E. LEAVE TYPES & LEAVE BALANCES ---
+      match /leaveTypes/{leaveTypeId} {
         allow read: if isCompanyMember(companyId);
         allow write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
       }
 
-      // Attendance records
-      match /attendanceRecords/{recordId} {
-        allow read: if isCompanyMember(companyId);
-        allow create: if isCompanyMember(companyId) && (
-          request.resource.data.employeeId == request.auth.uid ||
-          hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr', 'manager'])
+      match /leaveBalances/{balanceId} {
+        allow read: if isCompanyMember(companyId) && (
+          hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr', 'manager']) ||
+          (resource != null && resource.data.employeeId == request.auth.uid)
         );
-        allow update, delete: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
+        allow write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
       }
 
-      // Leave Requests
+      // --- 3F. LEAVE REQUESTS ---
       match /leaveRequests/{requestId} {
-        allow read: if isCompanyMember(companyId);
-        allow create: if isCompanyMember(companyId);
-        allow update: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr', 'manager']);
+        allow read: if isCompanyMember(companyId) && (
+          hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr', 'manager']) ||
+          (resource != null && resource.data.employeeId == request.auth.uid)
+        );
+
+        // Create: Employee creates request for THEMSELVES and must start in 'pending' status
+        allow create: if isCompanyMember(companyId) && (
+          (request.resource.data.employeeId == request.auth.uid && request.resource.data.status == 'pending') ||
+          hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr'])
+        );
+
+        // Update:
+        // - Employee can only CANCEL their own pending request
+        // - Managers / HR / Admins can APPROVE or REJECT
+        allow update: if isCompanyMember(companyId) && (
+          (resource.data.employeeId == request.auth.uid &&
+           resource.data.status == 'pending' &&
+           request.resource.data.status == 'cancelled' &&
+           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])) ||
+          (hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr', 'manager']) &&
+           request.resource.data.status in ['approved', 'rejected', 'cancelled'])
+        );
+
         allow delete: if hasCompanyRole(companyId, ['super_admin', 'company_admin']);
       }
 
-      // Sensitive Payroll runs and salary structures (Strictly isolated to Super Admin, Company Admin, and Payroll)
+      // --- 3G. PAYROLL & SALARY STRUCTURES (SENSITIVE) ---
+      // Strictly restricted to Super Admin, Company Admin, and Payroll Admin
       match /salaryStructures/{structureId} {
         allow read, write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'payroll']);
       }
@@ -91,10 +175,14 @@ service cloud.firestore {
         allow read, write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'payroll']);
       }
 
-      // Audit Logs: Append-only for system and company admins, never updatable/deletable
+      // --- 3H. AUDIT LOGS (IMMUTABLE APPEND-ONLY) ---
       match /auditLogs/{logId} {
         allow read: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
-        allow create: if isCompanyMember(companyId);
+        // Any authenticated company member can write audit events triggered by their actions
+        allow create: if isCompanyMember(companyId) &&
+          request.resource.data.companyId == companyId &&
+          request.resource.data.actorUid == request.auth.uid;
+        // Never allow update or deletion of audit records
         allow update, delete: if false;
       }
     }

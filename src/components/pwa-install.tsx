@@ -5,10 +5,15 @@ import { usePWAInstall } from '../hooks/usePWAInstall';
 import { Download, Smartphone, X } from 'lucide-react';
 
 export const PWAInstallButton: React.FC = () => {
+  const [mounted, setMounted] = useState(false);
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
 
-  if (isInstalled) {
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted || isInstalled) {
     return null;
   }
 

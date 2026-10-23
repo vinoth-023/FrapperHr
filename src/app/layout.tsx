@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
+import { Providers } from '../components/providers';
 
 export const viewport: Viewport = {
   themeColor: '#4f46e5',
@@ -35,7 +36,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark h-full">
       <body className="h-full bg-zinc-950 text-zinc-100 antialiased selection:bg-indigo-500 selection:text-white">
-        {children}
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

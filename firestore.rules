@@ -1,0 +1,102 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default-deny all unmapped paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions for hardened ABAC
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isCompanyMember(companyId) {
+      return isSignedIn() && exists(/databases/$(database)/documents/companies/$(companyId)/members/$(request.auth.uid));
+    }
+
+    function getMembership(companyId) {
+      return get(/databases/$(database)/documents/companies/$(companyId)/members/$(request.auth.uid)).data;
+    }
+
+    function hasCompanyRole(companyId, roles) {
+      return isCompanyMember(companyId) && (getMembership(companyId).role in roles);
+    }
+
+    // User profile documents
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow create, update: if isOwner(uid);
+      allow delete: if false;
+    }
+
+    // Companies & Company Isolation Gate
+    match /companies/{companyId} {
+      allow read: if isCompanyMember(companyId);
+      allow create: if isSignedIn();
+      allow update, delete: if hasCompanyRole(companyId, ['super_admin', 'company_admin']);
+
+      // Company memberships
+      match /members/{memberUid} {
+        allow read: if isCompanyMember(companyId);
+        allow create, update, delete: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
+      }
+
+      // Departments & Designations
+      match /departments/{departmentId} {
+        allow read: if isCompanyMember(companyId);
+        allow write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
+      }
+
+      match /designations/{designationId} {
+        allow read: if isCompanyMember(companyId);
+        allow write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
+      }
+
+      // Employees Directory
+      match /employees/{employeeId} {
+        allow read: if isCompanyMember(companyId);
+        allow write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
+      }
+
+      // Attendance records
+      match /attendanceRecords/{recordId} {
+        allow read: if isCompanyMember(companyId);
+        allow create: if isCompanyMember(companyId) && (
+          request.resource.data.employeeId == request.auth.uid ||
+          hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr', 'manager'])
+        );
+        allow update, delete: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
+      }
+
+      // Leave Requests
+      match /leaveRequests/{requestId} {
+        allow read: if isCompanyMember(companyId);
+        allow create: if isCompanyMember(companyId);
+        allow update: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr', 'manager']);
+        allow delete: if hasCompanyRole(companyId, ['super_admin', 'company_admin']);
+      }
+
+      // Sensitive Payroll runs and salary structures (Strictly isolated to Super Admin, Company Admin, and Payroll)
+      match /salaryStructures/{structureId} {
+        allow read, write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'payroll']);
+      }
+
+      match /payrollRuns/{runId} {
+        allow read, write: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'payroll']);
+      }
+
+      // Audit Logs: Append-only for system and company admins, never updatable/deletable
+      match /auditLogs/{logId} {
+        allow read: if hasCompanyRole(companyId, ['super_admin', 'company_admin', 'hr']);
+        allow create: if isCompanyMember(companyId);
+        allow update, delete: if false;
+      }
+    }
+  }
+}

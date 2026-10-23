@@ -1,0 +1,8 @@
+{
+  "name": "FrapperHR / MaxcoHRMS",
+  "description": "Production-oriented multi-company HRMS SaaS inspired by Frappe HR, featuring role-based access, attendance, leave management, and Indian statutory payroll compliance.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

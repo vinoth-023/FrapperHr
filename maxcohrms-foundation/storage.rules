@@ -1,0 +1,10 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Default-deny. Upload/download operations should use authenticated,
+    // tenant-authorized API flows or carefully scoped rules.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
